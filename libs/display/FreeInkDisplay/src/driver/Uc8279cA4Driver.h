@@ -19,6 +19,15 @@ class Uc8279cA4Driver : public PanelDriver {
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
+  // Async refresh split (PanelDriver contract): displayStart() loads RAM,
+  // fires the waveform, and returns while the panel drives it from its own
+  // RAM; displayFinish() waits out the completion, re-seeds the DTM1 baseline
+  // from the just-displayed frame (the facade supplies its async shadow
+  // there), and applies the requested power-off. Blocking display() composes
+  // both halves.
+  bool supportsAsyncDisplay() const override { return true; }
+  bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
+  void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   // Overlay (anti-aliased text) uses stock's reader "Gray3" path: the B/W base
   // and its gray masks go out as one three-level (white / middle / black)
   // transition from the previous Gray3 page, so a page turn drives only the
@@ -80,6 +89,10 @@ class Uc8279cA4Driver : public PanelDriver {
   uint8_t* _gray3Middle = nullptr;
   bool _gray3HistoryValid = false;
   bool _gray3Session = false;  // controller is already set up and powered for Gray3
+  // Async split state: a fired refresh whose completion (baseline re-seed and
+  // optional power-off) displayFinish() still owes.
+  bool _pendingRefresh = false;
+  bool _pendingTurnOff = false;
 };
 
 PanelDriver& uc8279cA4Driver();

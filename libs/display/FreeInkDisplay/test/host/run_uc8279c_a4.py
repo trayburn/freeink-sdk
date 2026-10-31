@@ -45,7 +45,7 @@ enum class BusyPolarity { ActiveLow };
 class EpdBus {
   uint8_t command=0;
 public:
-  unsigned refreshes=0;
+  unsigned refreshes=0, powerOffs=0;
   uint8_t interval=0;
   size_t lutBytes=0;
   std::vector<uint8_t> oldPlane, newPlane, oldAtRefresh, newAtRefresh;
@@ -53,6 +53,7 @@ public:
     command=c;
     if(c==0x10) oldPlane.clear();
     if(c==0x13) newPlane.clear();
+    if(c==0x02) ++powerOffs;
     if(c==0x12) {
       ++refreshes;
       oldAtRefresh=oldPlane;
@@ -69,6 +70,7 @@ public:
     (c==0x10 ? oldPlane : newPlane).assign(size_t(height)*widthBytes,value);
   }
   void waitBusy(const char*) {}
+  void waitRefreshComplete(const char*) {}
   struct Pins { int8_t rst=0; };
   Pins pins() const { return {}; }
   struct Txn { EpdBus* b; void writeBytes(const uint8_t* p, size_t n) { b->rawWriteBytes(p, n); } };

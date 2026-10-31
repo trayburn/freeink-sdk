@@ -185,5 +185,54 @@ int main() {
   assert(bus.refreshes == wakeStart + 2 && "first paint after wake must drive inverse, then target");
   driver.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);
   assert(bus.interval == 0xd7 && bus.lutBytes == 49);
-  std::cout << "PASS: A4 FAST cadence, post-AA pixel transitions, retained baseline, explicit cleanup, four-gray and Gray3 wire encoding and wake\n";
+
+  // Async refresh split: displayStart() fires the waveform and returns while
+  // the panel drives it; displayFinish() waits out the completion, re-seeds
+  // the DTM1 baseline from the just-displayed frame (the facade supplies its
+  // async shadow there), and applies the requested power-off. Blocking
+  // display() must compose both halves unchanged.
+  {
+    assert(driver.supportsAsyncDisplay() && "A4 must support the async refresh split");
+    for (auto& b : bw) b = static_cast<uint8_t>(b ^ 0x77);
+    const auto refreshes0 = bus.refreshes, powerOffs0 = bus.powerOffs;
+    const auto oldPlane0 = bus.oldPlane;
+    const bool deferred = driver.displayStart(bus, bw.data(), nullptr, RefreshMode::Fast, true);
+    assert(deferred && "steady-state FAST displayStart must defer");
+    assert(bus.refreshes == refreshes0 + 1 && "the waveform must fire inside displayStart");
+    assert(bus.powerOffs == powerOffs0 && "the requested power-off must wait for displayFinish");
+    assert(bus.oldPlane == oldPlane0 && "the DTM1 baseline re-seed must wait for displayFinish");
+    driver.displayFinish(bus, bw.data());
+    assert(bus.powerOffs == powerOffs0 + 1 && "displayFinish applies the deferred power-off");
+    assert(bus.oldPlane == bus.newAtRefresh && "displayFinish re-seeds DTM1 from the displayed frame");
+    // A finish with nothing pending is a no-op.
+    const auto powerOffs1 = bus.powerOffs;
+    driver.displayFinish(bus, bw.data());
+    assert(bus.powerOffs == powerOffs1 && "displayFinish without a pending start must not touch the bus");
+    // turnOff=false leaves the rails up (upstream power policy), and the next
+    // FAST diff still runs against the re-seeded baseline (the split frame),
+    // not against anything the caller drew since.
+    const auto splitFrame = bus.newAtRefresh;
+    for (auto& b : bw) b = static_cast<uint8_t>(b ^ 0x5a);
+    driver.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);
+    assert(bus.powerOffs == powerOffs1 && "turnOff=false must not power the panel down");
+    assert(bus.oldAtRefresh == splitFrame && "post-split FAST diff lost its baseline");
+  }
+
+  // Boot path: the unknown-glass inverse passes stay synchronous inside
+  // displayStart(); only the final target refresh defers.
+  {
+    driver.begin(bus);
+    for (auto& b : bw) b = static_cast<uint8_t>(b ^ 0x33);
+    const auto refreshes0 = bus.refreshes, powerOffs0 = bus.powerOffs;
+    const bool deferred = driver.displayStart(bus, bw.data(), nullptr, RefreshMode::Fast, true);
+    assert(deferred && "boot FAST displayStart must defer its final refresh");
+    assert(bus.refreshes == refreshes0 + 2 && "boot does both inverse passes synchronously");
+    assert(bus.powerOffs == powerOffs0 && "no power-off may run inside displayStart");
+    assert(bus.interval == 0x97 && "the first paint after begin is a full drive");
+    driver.displayFinish(bus, bw.data());
+    assert(bus.powerOffs == powerOffs0 + 1 && "the deferred refresh powers down at finish");
+    assert(bus.oldPlane == bus.newAtRefresh && "boot displayFinish re-seeds the baseline");
+  }
+
+  std::cout << "PASS: A4 FAST cadence, post-AA pixel transitions, retained baseline, explicit cleanup, four-gray and Gray3 wire encoding, wake, and the async refresh split\n";
 }

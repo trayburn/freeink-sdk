@@ -163,6 +163,8 @@ void Uc8279cA4Driver::begin(EpdBus& bus) {
   _gray3HistoryValid = false;
   _gray3Session = false;
   _basePending = false;
+  _pendingRefresh = false;
+  _pendingTurnOff = false;
   hardwareReset(bus);
   initController(bus);
   _firstRefreshPending = true;
@@ -170,6 +172,12 @@ void Uc8279cA4Driver::begin(EpdBus& bus) {
 
 void Uc8279cA4Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, const RefreshMode mode,
                               const bool turnOff) {
+  displayStart(bus, fb, prev, mode, turnOff);
+  displayFinish(bus, fb);
+}
+
+bool Uc8279cA4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, const RefreshMode mode,
+                                  const bool turnOff) {
   (void)prev;
   // Any B/W refresh replaces what a Gray3 transition would start from.
   _gray3HistoryValid = false;
@@ -206,12 +214,36 @@ void Uc8279cA4Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pre
     _firstRefreshPending = false;
   }
   writeFrame(bus, CMD_DTM2, fb);
-  refresh(bus, turnOff, fb);
-  // The displayed B/W frame is the base any following overlay gray pass folds
-  // onto, however the caller started that pass.
+  // Fire the waveform and hand the CPU back: the panel drives its own RAM
+  // copy while the caller keeps running. displayFinish() rides out the
+  // completion, re-seeds the DTM1 baseline, and applies the power-off.
+  bus.cmd(CMD_DISPLAY_REFRESH);
+  _pendingRefresh = true;
+  _pendingTurnOff = turnOff;
+  // The frame being displayed is the base any following overlay gray pass
+  // folds onto, however the caller started that pass.
   if (!_grayBase) _grayBase = allocateGrayBuffer();
   if (_grayBase && _grayBase != fb) memcpy(_grayBase, fb, static_cast<size_t>(_widthBytes) * _height);
   _redriveAfterGray = false;
+  return true;
+}
+
+void Uc8279cA4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
+  if (!_pendingRefresh) return;
+  _pendingRefresh = false;
+  // Safe both immediately after the fire and once the panel has already
+  // finished: the bus confirms the waveform is running before arming its
+  // completion wait.
+  bus.waitRefreshComplete(" A4 refresh");
+  // The displayed frame becomes the next differential's baseline. fb is the
+  // facade's async shadow (the just-displayed frame), so the caller is free
+  // to redraw its live framebuffer while the refresh runs.
+  writeFrame(bus, CMD_DTM1, fb);
+  if (_pendingTurnOff) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" A4 power-off");
+    _screenOn = false;
+  }
 }
 
 uint8_t* Uc8279cA4Driver::allocateGrayBuffer() {
@@ -399,6 +431,7 @@ void Uc8279cA4Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
 }
 
 void Uc8279cA4Driver::deepSleep(EpdBus& bus) {
+  _pendingRefresh = false;
   if (_screenOn) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" A4 power-off");
